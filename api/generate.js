@@ -1,53 +1,81 @@
+
 export default async function handler(req, res) {
-  if (req.method !== 'POST') {
-    return res.status(405).json({ error: 'Method Not Allowed' });
+  const imageUrl = req.body.imageUrl;
+  const replicateKey = process.env.REPLICATE_API_TOKEN;
+  const openaiKey = process.env.OPENAI_API_KEY;
+
+  // Step 1: Submit prediction
+  const predictionResponse = await fetch("https://api.replicate.com/v1/models/openai/gpt-image-1/predictions", {
+    method: "POST",
+    headers: {
+      "Authorization": `Bearer ${replicateKey}`,
+      "Content-Type": "application/json"
+    },
+    body: JSON.stringify({
+      input: {
+        prompt: `Slightly enlarge the head for a cartoonish look, while preserving facial structure.
+
+Add crossed, unfocused cartoon eyes with visible white space, keeping original eye size and orientation.
+
+Overlay an open mouth with a silly expression and blue drool, without changing the actual mouth shape.
+
+Keep hair, ears, eyebrows structure intact—just redraw in a hand-drawn cartoon style.
+
+if dont have ears, dont add ears.
+
+Preserve skin tone exactly from the image.
+
+Add a sketchy “LOWIQ” badge to the subject’s clothing.
+
+Use flat pastel or garish colors, no shading, wobbly cartoon lines.
+
+Do not change clothing, body, background, or pose.`,
+        input_images: [imageUrl],
+        openai_api_key: openaiKey,
+        quality: "high",
+        background: "auto",
+        moderation: "auto",
+        aspect_ratio: "1:1",
+        output_format: "png",
+        number_of_images: 1,
+        output_compression: 50
+      }
+    })
+  });
+
+  const prediction = await predictionResponse.json();
+
+  if (!prediction?.id) {
+    return res.status(500).json({ error: "Failed to start prediction." });
   }
 
-  const { user_image_url, prompt } = req.body;
+  const predictionId = prediction.id;
 
-  if (!user_image_url || typeof user_image_url !== 'string' || typeof prompt !== 'string') {
-    return res.status(400).json({ error: 'Invalid input' });
-  }
+  // Step 2: Poll until complete
+  const pollUrl = `https://api.replicate.com/v1/predictions/${predictionId}`;
+  let output = null;
+  let tries = 0;
 
-  if (!process.env.REPLICATE_API_TOKEN || !process.env.OPENAI_API_KEY) {
-    return res.status(500).json({ error: 'Missing API keys' });
-  }
-
-  // ✅ 고정된 Supabase 이미지 3개
-  const input_images = [
-    user_image_url,
-    'https://bkvgmmxrcldjoofqmprk.supabase.co/storage/v1/object/public/uploads//moon-hood.png',
-    'https://bkvgmmxrcldjoofqmprk.supabase.co/storage/v1/object/public/uploads//moon-cap.png',
-    'https://bkvgmmxrcldjoofqmprk.supabase.co/storage/v1/object/public/uploads//moon-bg.png'
-  ];
-
-  try {
-    const response = await fetch("https://api.replicate.com/v1/models/openai/gpt-image-1/predictions", {
-      method: "POST",
+  while (tries < 30) {
+    await new Promise(resolve => setTimeout(resolve, 4000)); // wait 2 sec
+    const pollRes = await fetch(pollUrl, {
       headers: {
-        Authorization: `Bearer ${process.env.REPLICATE_API_TOKEN}`,
-        "Content-Type": "application/json",
-        "Prefer": "wait"
-      },
-      body: JSON.stringify({
-        input: {
-          input_images,
-          prompt,
-          openai_api_key: process.env.OPENAI_API_KEY
-        }
-      })
+        "Authorization": `Bearer ${replicateKey}`
+      }
     });
-
-    const data = await response.json();
-
-    if (!data.output || !Array.isArray(data.output)) {
-      return res.status(500).json({ error: 'Replicate response invalid', raw: data });
+    const pollData = await pollRes.json();
+    if (pollData?.status === "succeeded") {
+      output = pollData.output;
+      break;
+    } else if (pollData?.status === "failed") {
+      return res.status(500).json({ error: "Replicate failed to generate image." });
     }
-
-    return res.status(200).json({ image_url: data.output[0] });
-
-  } catch (err) {
-    console.error('Replicate API error:', err);
-    return res.status(500).json({ error: 'Internal error', detail: err.message });
+    tries++;
   }
+
+  if (!output) {
+    return res.status(504).json({ error: "Timeout waiting for Replicate result." });
+  }
+
+  res.status(200).json({ output });
 }
